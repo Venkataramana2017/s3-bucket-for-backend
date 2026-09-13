@@ -9,7 +9,8 @@ on:
   issue_comment:
     types: [created]
 
-permissions: {}
+permissions:
+  contents: read
 
 # Serialize commands for each PR so an older run cannot overwrite its merge gate.
 concurrency:
@@ -156,12 +157,12 @@ jobs:
             fi
           done
           if [[ "$missing" == 1 ]]; then exit 1; fi
-      - name: Configure AWS credentials
+      - name: Configure AWS Credentials
         uses: aws-actions/configure-aws-credentials@v5
         with:
           aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
           aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
-          aws-region: ${{ env.AWS_REGION }}
+          aws-region: us-east-1
           allowed-account-ids: ${{ vars.AWS_ACCOUNT_ID }}
       - name: Configure shared state
         run: |
@@ -180,13 +181,14 @@ jobs:
           with open('ci.auto.tfvars.json', 'w') as f:
               json.dump({'aws_profile': None}, f)
           PY
-          # Record the runner platform checksum while retaining locked versions.
-          terraform init -input=false
+      - name: Terraform Init
+        # Record the runner platform checksum while retaining locked versions.
+        run: terraform init -input=false
       - name: Format and validate
         run: |
           terraform fmt -check
           terraform validate -no-color
-      - name: Generate plan
+      - name: Terraform Plan
         run: |
           set -euo pipefail
           args=()
