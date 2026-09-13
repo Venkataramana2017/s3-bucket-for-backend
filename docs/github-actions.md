@@ -1,6 +1,6 @@
 # Terraform through PRs
 
-Pushes to `main`, `freatue*` and `deve*` trigger formatting,
+Pushes to `main`, `feature*` and `deve*` trigger formatting,
 Terraform validation and command authorization tests. These checks run even when
 the branch has no PR and need no AWS credentials. A local commit alone does not
 trigger GitHub Actions; push it to GitHub. Branch deletion and tag pushes do not
@@ -42,13 +42,13 @@ run when a newer one queues; post another command if yours was superseded.
 
 The bucket managed by root Terraform must NOT hold its own state: `/destroy`
 would destroy it. `bootstrap/` independently provisions a protected,
-versioned state bucket and separate plan/deploy OIDC roles. It is never included
+versioned state bucket and outputs separate plan/deploy IAM permission policies.
+It does not create IAM users or access keys. It is never included
 in the PR workflow's Terraform execution.
 
 1. Copy `bootstrap/terraform.tfvars.example` to `bootstrap/terraform.tfvars` and
-   set the exact GitHub `owner/repository`. If the account already has the
-   `token.actions.githubusercontent.com` IAM OIDC provider, set its ARN too.
-2. Using an AWS identity permitted to create the bucket, OIDC provider and roles:
+   check the repository, account, region and managed bucket name.
+2. Using an AWS identity permitted to create and configure the state bucket:
 
    ```powershell
    $env:AWS_PROFILE = 'default'
@@ -73,11 +73,66 @@ in the PR workflow's Terraform execution.
 
 ## GitHub setup
 
+### Required execution before merge
+
+The workflow publishes the commit status `terraform-execution` on the authorized
+PR head commit. Opening/updating a PR or starting a new command blocks merging.
+A successful `/plan` leaves it pending. Only a fully successful `/apply` or
+`/destroy` job can mark it successful, after rechecking that the PR is still open,
+non-draft, from this repository, and at the same commit. Failures, cancellations,
+and skipped execution cannot unlock merging. Each execution generates a fresh
+plan before applying it. A new commit needs a new successful execution; a new
+`/plan` also blocks merging until another successful `/apply` or `/destroy`.
+Commands for each PR are serialized to prevent an older run overwriting a newer
+result. The status publisher runs on a separate runner from PR Terraform code.
+
+One-time activation:
+
+1. Install the updated `.github/workflows/terraform.yml` and `.github/scripts/`
+   on the default branch. Comment events load their workflow and scripts there.
+   This is a workflow-only setup change, not a merge of pending infrastructure.
+2. Protect `main`: require a pull request and the `terraform-execution` status
+   check, require the branch to be up to date, and enforce the rule for admins
+   without bypass actors. Bind the status source to the GitHub Actions app.
+   Do not require the conditional `terraform` job instead: skipped jobs can
+   satisfy required checks even when no infrastructure operation ran.
+3. Open a non-draft feature PR. Inspect the plan, then post `/apply` or `/destroy`
+   as appropriate. Keep the PR open until execution succeeds. Merge manually
+   after `terraform-execution` turns green and any other required checks pass.
+
+The workflow YAML alone does not enforce merge protection. Install the workflow
+before enabling the required status to avoid a setup deadlock. Writers with
+permission to modify workflows remain trusted; review workflow changes carefully.
+
+### Environments, AWS secrets and variables
+
 Create GitHub environments named `terraform-plan` and `terraform-deploy`.
-Set each environment's `AWS_ROLE_ARN` variable to its corresponding bootstrap
-`github_environment_roles` output. Plan can read the managed bucket and state,
-and create/remove lock files; deploy can manage the named bucket and update
-state. Neither role can delete the state bucket or state object.
+Under **Settings > Secrets and variables > Actions > Secrets**, add:
+
+| Secret | Value |
+| --- | --- |
+| `AWS_ACCESS_KEY_ID` | Your IAM user's access key ID |
+| `AWS_SECRET_ACCESS_KEY` | The matching secret access key |
+
+The workflow reads these through `secrets.*`. Enter values directly in GitHub;
+never put them in YAML, Terraform variables, commits or PR comments. Repository
+secrets are available to both environments. For separate plan/deploy identities,
+set the same secret names under each environment instead; environment secrets
+override repository secrets.
+
+The bootstrap `github_iam_policies` output contains JSON policies to attach to
+your existing IAM users. The `terraform-plan` policy allows reading the managed
+bucket and state, and creating/removing state locks. The `terraform-deploy`
+policy also allows managing the named bucket and writing state. If using one
+IAM user for both operations, it needs the deploy policy. These policies do not
+grant deletion of the state bucket or state file; other policies attached to
+the user can grant additional permissions. Bootstrap does not attach policies.
+
+`AWS_ROLE_ARN` and a GitHub OIDC provider are not required by this workflow.
+If replacing a previously deployed OIDC bootstrap, review its plan carefully:
+the updated configuration removes the old OIDC provider and roles from management
+and Terraform will propose deleting them. Do not apply that deletion while other
+workflows depend on them.
 
 Set these repository Actions variables:
 
@@ -88,8 +143,8 @@ Set these repository Actions variables:
 | `TF_STATE_BUCKET` | Bootstrap `state_bucket` output |
 | `TF_STATE_KEY` | `s3/terraform.tfstate` |
 
-Enable GitHub Actions and allow workflows to comment on PRs. No AWS access-key
-secrets are needed: authentication uses GitHub OIDC. Keep environment deployment
+Enable GitHub Actions and allow workflows to comment on PRs. Authentication uses
+the configured IAM user access keys. Keep environment deployment
 branches restricted to the default branch (the privileged workflow runs there).
 An optional required reviewer on `terraform-deploy` adds a GitHub approval gate
 before apply/destroy; leave it unset for comment-only execution.
@@ -99,14 +154,15 @@ the default branch first. Comment events only execute workflows already on the
 default branch. Then open a new same-repository test PR. The workflow and its
 authorization script are loaded from the default branch; only Terraform code is
 checked out at the authorized PR commit. Repository writers are trusted to run
-Terraform code with the role assigned to the operation. Protect workflow/IAM
+Terraform code with the IAM user permissions assigned to the operation. Protect workflow/IAM
 changes through normal default-branch review.
 
-This workspace did not initially contain Git metadata or a remote. Until these
-files are pushed and AWS/GitHub setup is completed, the workflow is not live.
-Changing the managed bucket name also requires updating the bootstrap role's
-`managed_bucket_name` and applying bootstrap before running the PR workflow.
+After configuration, post a new `/plan` comment on the open PR. Existing failed
+runs keep their original workflow; do not use rerun to authorize a command.
+Changing the managed bucket name also requires updating bootstrap's
+`managed_bucket_name` and attaching the updated permission policy to the IAM user
+before running the PR workflow.
 
 References: [GitHub comment events](https://docs.github.com/en/actions/reference/workflows-and-actions/events-that-trigger-workflows#issue_comment),
-[AWS OIDC](https://docs.github.com/en/actions/how-tos/secure-your-work/security-harden-deployments/oidc-in-aws),
+[AWS credentials action](https://github.com/aws-actions/configure-aws-credentials),
 [Terraform S3 state and locking](https://developer.hashicorp.com/terraform/language/backend/s3).

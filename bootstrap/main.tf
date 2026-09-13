@@ -37,17 +37,10 @@ variable "managed_bucket_name" {
   default = "bucket-backend-terraform"
 }
 
-variable "existing_oidc_provider_arn" {
-  description = "Existing token.actions.githubusercontent.com provider ARN, if one already exists in this account."
-  type        = string
-  default     = null
-}
-
 locals {
   suffix       = substr(sha256(var.github_repository), 0, 10)
   state_key    = "s3/terraform.tfstate"
   managed_arn  = "arn:aws:s3:::${var.managed_bucket_name}"
-  oidc_arn     = var.existing_oidc_provider_arn != null ? var.existing_oidc_provider_arn : aws_iam_openid_connect_provider.github[0].arn
   environments = toset(["terraform-plan", "terraform-deploy"])
 }
 
@@ -108,39 +101,14 @@ resource "aws_s3_bucket_policy" "state" {
   })
 }
 
-resource "aws_iam_openid_connect_provider" "github" {
-  count          = var.existing_oidc_provider_arn == null ? 1 : 0
-  url            = "https://token.actions.githubusercontent.com"
-  client_id_list = ["sts.amazonaws.com"]
-}
-
-resource "aws_iam_role" "github" {
-  for_each = local.environments
-  name     = "s3-${each.key}-${local.suffix}"
-  assume_role_policy = jsonencode({
-    Version = "2012-10-17"
-    Statement = [{
-      Effect    = "Allow"
-      Principal = { Federated = local.oidc_arn }
-      Action    = "sts:AssumeRoleWithWebIdentity"
-      Condition = { StringEquals = {
-        "token.actions.githubusercontent.com:aud" = "sts.amazonaws.com"
-        "token.actions.githubusercontent.com:sub" = "repo:${var.github_repository}:environment:${each.key}"
-      } }
-    }]
-  })
-}
-
-resource "aws_iam_role_policy" "github" {
-  for_each = local.environments
-  role     = aws_iam_role.github[each.key].id
-  policy = jsonencode({
+locals {
+  github_iam_policies = { for environment in local.environments : environment => jsonencode({
     Version = "2012-10-17"
     Statement = [
       {
         Sid      = "ManagedBucket"
         Effect   = "Allow"
-        Action   = each.key == "terraform-plan" ? ["s3:Get*", "s3:List*"] : ["s3:*"]
+        Action   = environment == "terraform-plan" ? ["s3:Get*", "s3:List*"] : ["s3:*"]
         Resource = [local.managed_arn, "${local.managed_arn}/*"]
       },
       {
@@ -152,7 +120,7 @@ resource "aws_iam_role_policy" "github" {
       {
         Sid      = "StateFile"
         Effect   = "Allow"
-        Action   = each.key == "terraform-plan" ? ["s3:GetObject"] : ["s3:GetObject", "s3:PutObject"]
+        Action   = environment == "terraform-plan" ? ["s3:GetObject"] : ["s3:GetObject", "s3:PutObject"]
         Resource = "${aws_s3_bucket.state.arn}/${local.state_key}"
       },
       {
@@ -162,7 +130,7 @@ resource "aws_iam_role_policy" "github" {
         Resource = "${aws_s3_bucket.state.arn}/${local.state_key}.tflock"
       }
     ]
-  })
+  }) }
 }
 
 output "state_bucket" {
@@ -173,6 +141,7 @@ output "state_key" {
   value = local.state_key
 }
 
-output "github_environment_roles" {
-  value = { for name, role in aws_iam_role.github : name => role.arn }
+output "github_iam_policies" {
+  description = "JSON policies to attach to existing IAM users for GitHub plan and deploy credentials. No users or access keys are created."
+  value       = local.github_iam_policies
 }

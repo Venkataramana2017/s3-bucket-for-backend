@@ -23,8 +23,14 @@ module.exports = async ({ github, context, core }) => {
     throw new Error('Only repository collaborators with write permission can run Terraform.');
   }
   const { data: pr } = await github.rest.pulls.get({ ...repo, pull_number: number });
-  if (pr.state !== 'open' || pr.draft || pr.head.repo?.full_name !== `${repo.owner}/${repo.repo}`) {
-    throw new Error('Terraform requires an open, non-draft PR from this repository. Fork PRs are not supported.');
+  if (pr.state !== 'open') {
+    throw new Error(`PR #${number} is ${pr.merged_at ? 'merged' : pr.state}. Post the command on an open PR; create a new PR for further changes after merging.`);
+  }
+  if (pr.draft) {
+    throw new Error(`PR #${number} is a draft. Mark it ready for review before running Terraform.`);
+  }
+  if (pr.head.repo?.full_name !== `${repo.owner}/${repo.repo}`) {
+    throw new Error(`PR #${number} must come from this repository. Fork PRs are not supported.`);
   }
   if (context.eventName === 'pull_request_target' && context.payload.pull_request.head.sha !== pr.head.sha) {
     throw new Error('This PR event is stale.');

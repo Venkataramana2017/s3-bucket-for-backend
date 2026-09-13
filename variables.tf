@@ -23,7 +23,7 @@ variable "aws_account_id" {
 variable "bucket_name" {
   description = "Globally unique S3 bucket name."
   type        = string
-  default     = "bucket-backend-terraform"
+  default     = "bucket-backend-terraform-313932316713-us-east-1"
   validation {
     condition = (
       can(regex("^[a-z0-9][a-z0-9-]{1,61}[a-z0-9]$", var.bucket_name)) &&

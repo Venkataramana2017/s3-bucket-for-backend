@@ -47,9 +47,13 @@ for (const permission of ['read', 'triage', 'none']) {
     await assert.rejects(authorize(fixture({ permission }).input), /write permission/);
   });
 }
-for (const settings of [{ fork: true }, { draft: true }, { state: 'closed' }]) {
+for (const [settings, message] of [
+  [{ fork: true }, /Fork PRs are not supported/],
+  [{ draft: true }, /is a draft/],
+  [{ state: 'closed' }, /is closed.*open PR/]
+]) {
   test(`rejects ineligible PR ${JSON.stringify(settings)}`, async () => {
-    await assert.rejects(authorize(fixture(settings).input), /open, non-draft PR/);
+    await assert.rejects(authorize(fixture(settings).input), message);
   });
 }
 test('ordinary issue comment is ignored', async () => {
