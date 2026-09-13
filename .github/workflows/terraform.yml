@@ -1,0 +1,178 @@
+name: Terraform CI and PR commands
+
+on:
+  push:
+    branches: ['main', 'feature*', 'deve*']
+  workflow_dispatch:
+  pull_request_target:
+    types: [opened, synchronize, reopened, ready_for_review]
+  issue_comment:
+    types: [created]
+
+permissions: {}
+
+jobs:
+  validate:
+    name: Validate Terraform
+    if: github.event_name == 'workflow_dispatch' || (github.event_name == 'push' && github.event.deleted == false)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: 1.16.2
+          terraform_wrapper: false
+      - name: Check Terraform formatting
+        run: terraform fmt -check -recursive
+      - name: Initialize without cloud state
+        # Allow Terraform to record the Linux h1 checksum after verifying the
+        # package against the lock file's signed release checksums.
+        run: terraform init -backend=false -input=false
+      - name: Validate Terraform
+        run: terraform validate -no-color
+      - name: Test PR command authorization
+        run: node --test .github/scripts/authorize.test.js
+      - name: Explain manual commands
+        run: |
+          cat >> "$GITHUB_STEP_SUMMARY" <<'EOF'
+          ### Branch checks complete
+          Open a pull request for this branch. In the PR Conversation tab,
+          post `/plan`, `/apply`, or `/destroy` as a new comment to run Terraform.
+          Commands require repository write permission and configured AWS/shared state.
+          EOF
+
+  authorize:
+    if: github.event_name == 'pull_request_target' || github.event.issue.pull_request
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: read
+    outputs:
+      operation: ${{ steps.command.outputs.operation }}
+      sha: ${{ steps.command.outputs.sha }}
+      pr: ${{ steps.command.outputs.pr }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.repository.default_branch }}
+          persist-credentials: false
+      - uses: actions/github-script@v7
+        id: command
+        with:
+          script: |
+            await require('./.github/scripts/authorize.js')({ github, context, core });
+
+  terraform:
+    needs: authorize
+    if: needs.authorize.outputs.operation != ''
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    # All PRs use the same state. Never cancel an in-progress apply/destroy.
+    concurrency:
+      group: terraform-s3-shared-state
+      cancel-in-progress: false
+    environment: ${{ needs.authorize.outputs.operation == 'plan' && 'terraform-plan' || 'terraform-deploy' }}
+    permissions:
+      contents: read
+      pull-requests: write
+      id-token: write
+    env:
+      TF_IN_AUTOMATION: 'true'
+      TF_INPUT: 'false'
+      AWS_REGION: ${{ vars.AWS_REGION || 'us-east-1' }}
+      TF_VAR_aws_region: ${{ vars.AWS_REGION || 'us-east-1' }}
+      TF_VAR_aws_account_id: ${{ vars.AWS_ACCOUNT_ID }}
+      STATE_BUCKET: ${{ vars.TF_STATE_BUCKET }}
+      STATE_KEY: ${{ vars.TF_STATE_KEY || 's3/terraform.tfstate' }}
+      OPERATION: ${{ needs.authorize.outputs.operation }}
+      PR_NUMBER: ${{ needs.authorize.outputs.pr }}
+      PR_SHA: ${{ needs.authorize.outputs.sha }}
+    defaults:
+      run:
+        shell: bash
+        working-directory: infra
+    steps:
+      - name: Recheck PR before obtaining AWS credentials
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const { data: pr } = await github.rest.pulls.get({ ...context.repo, pull_number: Number(process.env.PR_NUMBER) });
+            const { data: permission } = await github.rest.repos.getCollaboratorPermissionLevel({ ...context.repo, username: context.actor });
+            if (!['admin', 'maintain', 'write'].includes(permission.permission) || pr.state !== 'open' || pr.draft || pr.head.sha !== process.env.PR_SHA || pr.head.repo?.full_name !== `${context.repo.owner}/${context.repo.repo}`) {
+              throw new Error('Authorization or PR head changed; post a new command.');
+            }
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.authorize.outputs.sha }}
+          path: infra
+          persist-credentials: false
+      - uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: 1.16.2
+          terraform_wrapper: false
+      - uses: aws-actions/configure-aws-credentials@v5
+        with:
+          role-to-assume: ${{ vars.AWS_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+          allowed-account-ids: ${{ vars.AWS_ACCOUNT_ID }}
+          role-session-name: terraform-${{ github.run_id }}
+      - name: Configure shared state
+        run: |
+          set -euo pipefail
+          : "${STATE_BUCKET:?Set TF_STATE_BUCKET}"
+          : "${TF_VAR_aws_account_id:?Set AWS_ACCOUNT_ID}"
+          # Fail closed until existing local state has been migrated.
+          aws s3api head-object --bucket "$STATE_BUCKET" --key "$STATE_KEY" >/dev/null
+          python3 - <<'PY'
+          import json, os
+          with open('backend.generated.tf.json', 'w') as f:
+              json.dump({'terraform': {'backend': {'s3': {
+                  'bucket': os.environ['STATE_BUCKET'], 'key': os.environ['STATE_KEY'],
+                  'region': os.environ['AWS_REGION'], 'encrypt': True, 'use_lockfile': True
+              }}}}, f)
+          with open('ci.auto.tfvars.json', 'w') as f:
+              json.dump({'aws_profile': None}, f)
+          PY
+          # Record the runner platform checksum while retaining locked versions.
+          terraform init -input=false
+      - name: Format and validate
+        run: |
+          terraform fmt -check
+          terraform validate -no-color
+      - name: Generate plan
+        run: |
+          set -euo pipefail
+          args=()
+          if [[ "$OPERATION" == destroy ]]; then args+=(-destroy); fi
+          terraform plan -no-color -lock-timeout=5m "${args[@]}" -out=run.tfplan >plan.txt 2>&1 || { cat plan.txt; exit 1; }
+          cat plan.txt
+          { echo '### Terraform plan'; echo '```'; cat plan.txt; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
+      - name: Verify commit immediately before execution
+        if: env.OPERATION != 'plan'
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const { data: pr } = await github.rest.pulls.get({ ...context.repo, pull_number: Number(process.env.PR_NUMBER) });
+            if (pr.state !== 'open' || pr.draft || pr.head.sha !== process.env.PR_SHA) throw new Error('PR changed while planning. Post a new command.');
+      - name: Apply saved plan (including destroy plans)
+        if: env.OPERATION != 'plan'
+        run: terraform apply -input=false -no-color -lock-timeout=5m run.tfplan
+      - name: Report result on PR
+        if: always()
+        uses: actions/github-script@v7
+        env:
+          RESULT: ${{ job.status }}
+        with:
+          script: |
+            const fs = require('fs');
+            const file = 'infra/plan.txt';
+            const plan = fs.existsSync(file) ? fs.readFileSync(file, 'utf8').slice(-45000).replace(/```/g, "'''") : 'Plan unavailable; see workflow logs.';
+            const url = `${context.serverUrl}/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}`;
+            const sha = process.env.PR_SHA;
+            const body = `Terraform **${process.env.OPERATION}**: **${process.env.RESULT}**\n\nCommit: \`${sha}\` | [Workflow logs](${url})\n\n<details><summary>Plan (last 45,000 characters)</summary>\n\n\`\`\`text\n${plan}\n\`\`\`\n</details>\n\nCommands (target the current PR head):\n- \`/plan\`\n- \`/apply\`\n- \`/destroy\`\n\nApply and destroy generate a fresh plan and execute it. Destroy removes the resources in the shared state.`;
+            await github.rest.issues.createComment({ ...context.repo, issue_number: Number(process.env.PR_NUMBER), body });
