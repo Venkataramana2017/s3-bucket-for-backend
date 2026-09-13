@@ -30,7 +30,9 @@ jobs:
       - name: Check Terraform formatting
         run: terraform fmt -check -recursive
       - name: Initialize without cloud state
-        run: terraform init -backend=false -input=false -lockfile=readonly
+        # Allow Terraform to record the Linux h1 checksum after verifying the
+        # package against the lock file's signed release checksums.
+        run: terraform init -backend=false -input=false
       - name: Validate Terraform
         run: terraform validate -no-color
       - name: Test PR command authorization
@@ -136,7 +138,8 @@ jobs:
           with open('ci.auto.tfvars.json', 'w') as f:
               json.dump({'aws_profile': None}, f)
           PY
-          terraform init -input=false -lockfile=readonly
+          # Record the runner platform checksum while retaining locked versions.
+          terraform init -input=false
       - name: Format and validate
         run: |
           terraform fmt -check
