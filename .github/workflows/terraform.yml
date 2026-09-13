@@ -2,7 +2,8 @@ name: Terraform CI and PR commands
 
 on:
   push:
-    branches: ['main', 'freatue*', 'deve*']
+    branches: ['main', 'feature*', 'deve*']
+  workflow_dispatch:
   pull_request_target:
     types: [opened, synchronize, reopened, ready_for_review]
   issue_comment:
@@ -12,8 +13,8 @@ permissions: {}
 
 jobs:
   validate:
-    name: Validate branch push
-    if: github.event_name == 'push' && github.event.deleted == false
+    name: Validate Terraform
+    if: github.event_name == 'workflow_dispatch' || (github.event_name == 'push' && github.event.deleted == false)
     runs-on: ubuntu-latest
     timeout-minutes: 10
     permissions:
