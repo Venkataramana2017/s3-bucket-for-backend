@@ -11,6 +11,11 @@ on:
 
 permissions: {}
 
+# Serialize commands for each PR so an older run cannot overwrite its merge gate.
+concurrency:
+  group: terraform-pr-${{ github.event.issue.number || github.event.pull_request.number || github.ref }}
+  cancel-in-progress: false
+
 jobs:
   validate:
     name: Validate Terraform
@@ -36,7 +41,7 @@ jobs:
       - name: Validate Terraform
         run: terraform validate -no-color
       - name: Test PR command authorization
-        run: node --test .github/scripts/authorize.test.js
+        run: node --test .github/scripts/*.test.js
       - name: Explain manual commands
         run: |
           cat >> "$GITHUB_STEP_SUMMARY" <<'EOF'
@@ -61,14 +66,37 @@ jobs:
         with:
           ref: ${{ github.event.repository.default_branch }}
           persist-credentials: false
-      - uses: actions/github-script@v7
+      - uses: actions/github-script@v8
         id: command
         with:
           script: |
             await require('./.github/scripts/authorize.js')({ github, context, core });
 
-  terraform:
+  block_merge:
     needs: authorize
+    if: needs.authorize.outputs.operation != ''
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: read
+      statuses: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.repository.default_branch }}
+          persist-credentials: false
+      - uses: actions/github-script@v8
+        env:
+          GATE_PHASE: start
+          OPERATION: ${{ needs.authorize.outputs.operation }}
+          PR_NUMBER: ${{ needs.authorize.outputs.pr }}
+          PR_SHA: ${{ needs.authorize.outputs.sha }}
+        with:
+          script: |
+            await require('./.github/scripts/merge-gate.js')({ github, context });
+
+  terraform:
+    needs: [authorize, block_merge]
     if: needs.authorize.outputs.operation != ''
     runs-on: ubuntu-latest
     timeout-minutes: 30
@@ -98,7 +126,7 @@ jobs:
         working-directory: infra
     steps:
       - name: Recheck PR before obtaining AWS credentials
-        uses: actions/github-script@v7
+        uses: actions/github-script@v8
         with:
           script: |
             const { data: pr } = await github.rest.pulls.get({ ...context.repo, pull_number: Number(process.env.PR_NUMBER) });
@@ -154,7 +182,7 @@ jobs:
           { echo '### Terraform plan'; echo '```'; cat plan.txt; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
       - name: Verify commit immediately before execution
         if: env.OPERATION != 'plan'
-        uses: actions/github-script@v7
+        uses: actions/github-script@v8
         with:
           script: |
             const { data: pr } = await github.rest.pulls.get({ ...context.repo, pull_number: Number(process.env.PR_NUMBER) });
@@ -164,7 +192,7 @@ jobs:
         run: terraform apply -input=false -no-color -lock-timeout=5m run.tfplan
       - name: Report result on PR
         if: always()
-        uses: actions/github-script@v7
+        uses: actions/github-script@v8
         env:
           RESULT: ${{ job.status }}
         with:
@@ -176,3 +204,28 @@ jobs:
             const sha = process.env.PR_SHA;
             const body = `Terraform **${process.env.OPERATION}**: **${process.env.RESULT}**\n\nCommit: \`${sha}\` | [Workflow logs](${url})\n\n<details><summary>Plan (last 45,000 characters)</summary>\n\n\`\`\`text\n${plan}\n\`\`\`\n</details>\n\nCommands (target the current PR head):\n- \`/plan\`\n- \`/apply\`\n- \`/destroy\`\n\nApply and destroy generate a fresh plan and execute it. Destroy removes the resources in the shared state.`;
             await github.rest.issues.createComment({ ...context.repo, issue_number: Number(process.env.PR_NUMBER), body });
+
+  report_merge_gate:
+    # Use a fresh runner; PR Terraform code never receives the status-write token.
+    needs: [authorize, block_merge, terraform]
+    if: always() && needs.block_merge.result == 'success'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: read
+      statuses: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.repository.default_branch }}
+          persist-credentials: false
+      - uses: actions/github-script@v8
+        env:
+          GATE_PHASE: finish
+          OPERATION: ${{ needs.authorize.outputs.operation }}
+          PR_NUMBER: ${{ needs.authorize.outputs.pr }}
+          PR_SHA: ${{ needs.authorize.outputs.sha }}
+          TERRAFORM_RESULT: ${{ needs.terraform.result }}
+        with:
+          script: |
+            await require('./.github/scripts/merge-gate.js')({ github, context });

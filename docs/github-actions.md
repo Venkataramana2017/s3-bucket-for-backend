@@ -1,6 +1,6 @@
 # Terraform through PRs
 
-Pushes to `main`, `freatue*` and `deve*` trigger formatting,
+Pushes to `main`, `feature*` and `deve*` trigger formatting,
 Terraform validation and command authorization tests. These checks run even when
 the branch has no PR and need no AWS credentials. A local commit alone does not
 trigger GitHub Actions; push it to GitHub. Branch deletion and tag pushes do not
@@ -72,6 +72,39 @@ in the PR workflow's Terraform execution.
    retains an empty state object so a later apply can recreate the bucket.
 
 ## GitHub setup
+
+### Required execution before merge
+
+The workflow publishes the commit status `terraform-execution` on the authorized
+PR head commit. Opening/updating a PR or starting a new command blocks merging.
+A successful `/plan` leaves it pending. Only a fully successful `/apply` or
+`/destroy` job can mark it successful, after rechecking that the PR is still open,
+non-draft, from this repository, and at the same commit. Failures, cancellations,
+and skipped execution cannot unlock merging. Each execution generates a fresh
+plan before applying it. A new commit needs a new successful execution; a new
+`/plan` also blocks merging until another successful `/apply` or `/destroy`.
+Commands for each PR are serialized to prevent an older run overwriting a newer
+result. The status publisher runs on a separate runner from PR Terraform code.
+
+One-time activation:
+
+1. Install the updated `.github/workflows/terraform.yml` and `.github/scripts/`
+   on the default branch. Comment events load their workflow and scripts there.
+   This is a workflow-only setup change, not a merge of pending infrastructure.
+2. Protect `main`: require a pull request and the `terraform-execution` status
+   check, require the branch to be up to date, and enforce the rule for admins
+   without bypass actors. Bind the status source to the GitHub Actions app.
+   Do not require the conditional `terraform` job instead: skipped jobs can
+   satisfy required checks even when no infrastructure operation ran.
+3. Open a non-draft feature PR. Inspect the plan, then post `/apply` or `/destroy`
+   as appropriate. Keep the PR open until execution succeeds. Merge manually
+   after `terraform-execution` turns green and any other required checks pass.
+
+The workflow YAML alone does not enforce merge protection. Install the workflow
+before enabling the required status to avoid a setup deadlock. Writers with
+permission to modify workflows remain trusted; review workflow changes carefully.
+
+### Environments and AWS variables
 
 Create GitHub environments named `terraform-plan` and `terraform-deploy`.
 Set each environment's `AWS_ROLE_ARN` variable to its corresponding bootstrap
