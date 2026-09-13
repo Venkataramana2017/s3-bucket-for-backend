@@ -1,0 +1,5 @@
+aws_region     = "us-east-1"
+aws_profile    = "default"
+aws_account_id = "313932316713"
+bucket_name    = "bucket-backend-terraform"
+environment    = "Dev"
