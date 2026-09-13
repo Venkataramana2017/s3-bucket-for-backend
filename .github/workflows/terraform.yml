@@ -143,6 +143,19 @@ jobs:
         with:
           terraform_version: 1.16.2
           terraform_wrapper: false
+      - name: Check AWS and state configuration
+        env:
+          AWS_ROLE_ARN: ${{ vars.AWS_ROLE_ARN }}
+        run: |
+          set -euo pipefail
+          missing=0
+          for variable in AWS_ROLE_ARN TF_VAR_aws_account_id STATE_BUCKET; do
+            if [[ -z "${!variable}" ]]; then
+              echo "::error::Missing $variable. Configure AWS_ROLE_ARN in terraform-plan/terraform-deploy, and repository variables AWS_ACCOUNT_ID and TF_STATE_BUCKET. See docs/github-actions.md."
+              missing=1
+            fi
+          done
+          if [[ "$missing" == 1 ]]; then exit 1; fi
       - uses: aws-actions/configure-aws-credentials@v5
         with:
           role-to-assume: ${{ vars.AWS_ROLE_ARN }}
