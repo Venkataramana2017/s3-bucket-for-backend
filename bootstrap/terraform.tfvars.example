@@ -1,3 +1,5 @@
-github_repository = "OWNER/REPOSITORY"
-# Set this if the account already has GitHub's OIDC provider:
-# existing_oidc_provider_arn = "arn:aws:iam::313932316713:oidc-provider/token.actions.githubusercontent.com"
+github_repository = "Venkataramana2017/s3-bucket-for-backend"
+aws_account_id    = "313932316713"
+aws_region        = "us-east-1"
+managed_bucket_name = "bucket-backend-terraform"
+# Access keys belong in GitHub Secrets, never in this file.

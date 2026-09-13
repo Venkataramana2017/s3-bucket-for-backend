@@ -47,4 +47,5 @@ With the required `terraform-execution` status enabled on `main`, a PR can merge
 only after `/apply` or `/destroy` succeeds for its current commit. A plan alone
 does not unlock merging. New commits require another successful execution.
 See [GitHub Actions setup](docs/github-actions.md) for the separate state bucket,
-OIDC roles, state migration and required GitHub variables before enabling CI.
+IAM user permissions, state migration, GitHub secrets (`AWS_ACCESS_KEY_ID` and
+`AWS_SECRET_ACCESS_KEY`) and required GitHub variables before enabling CI.
